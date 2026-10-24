@@ -1,8 +1,6 @@
-# agent.py
 import os
 import json
 from enum import Enum
-from typing import Dict, Any, List
 from dotenv import load_dotenv
 from google import genai
 
@@ -29,13 +27,14 @@ class AgentState(str, Enum):
 class WarRoomAgent:
     MAX_TOOL_CALLS = 8
 
-    def __init__(self, tool_wrapper: SeededFaultWrapper, verifier_enabled: bool = True):
+    def __init__(self, tool_wrapper, verifier_enabled=True):
         self.wrapper = tool_wrapper
         self.verifier_enabled = verifier_enabled
         self.verifier = DeterministicVerifier(tool_wrapper.tools.docs_by_id)
 
-    def _plan_required_steps(self, query: str) -> List[Dict[str, Any]]:
-        if os.environ.get("LLM_PROVIDER") != "gemini" or gemini_client is None:
+    def _plan_required_steps(self, query):
+        # fast path: fallback to deterministic routing if no api key or non-gemini provider
+        if os.environ.get("LLM_PROVIDER") != "gemini" or not gemini_client:
             return self._deterministic_plan(query)
 
         prompt = f"""
@@ -55,12 +54,12 @@ class WarRoomAgent:
         """
 
         try:
-            response = gemini_client.models.generate_content(
+            resp = gemini_client.models.generate_content(
                 model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
                 contents=prompt,
             )
-            raw_json = response.text.replace("```json", "").replace("```", "").strip()
-            parsed = json.loads(raw_json)
+            raw = resp.text.replace("```json", "").replace("```", "").strip()
+            parsed = json.loads(raw)
             if isinstance(parsed, list):
                 return parsed
             return [{"tool": "search_docs", "kwargs": {"query": query}}]
@@ -69,25 +68,24 @@ class WarRoomAgent:
         except Exception:
             return self._deterministic_plan(query)
 
-    def _deterministic_plan(self, query: str) -> List[Dict[str, Any]]:
+    def _deterministic_plan(self, query):
         q = query.lower()
         steps = []
 
-        if "instagram" in q or "cac" in q or "marketing" in q:
+        if any(k in q for k in ("instagram", "cac", "marketing")):
             steps.append({"tool": "search_docs", "kwargs": {"query": "marketing instagram cac acquisition cost"}})
             return steps
 
         if "full multi-zone audit" in q:
-            steps.extend([
+            return [
                 {"tool": "run_sql", "kwargs": {"read_only_query": "SELECT week_bucket, COUNT(*) FROM refunds WHERE pincode_tier='Tier-3' GROUP BY week_bucket"}},
                 {"tool": "run_sql", "kwargs": {"read_only_query": "SELECT refund_reason, COUNT(*) FROM refunds WHERE pincode_tier='Tier-3' AND week_bucket='current_week' GROUP BY refund_reason"}},
                 {"tool": "get_policy", "kwargs": {"name": "seller_replacement_policy"}},
                 {"tool": "get_policy", "kwargs": {"name": "reverse_pickup_fee"}},
                 {"tool": "search_docs", "kwargs": {"query": "Guwahati roof leak incident DOC-WH-009"}},
-            ])
-            return steps
+            ]
 
-        if "tier-3" in q and ("refund" in q or "badh" in q or "spike" in q):
+        if "tier-3" in q and any(k in q for k in ("refund", "badh", "spike")):
             steps.append({
                 "tool": "run_sql",
                 "kwargs": {
@@ -97,6 +95,7 @@ class WarRoomAgent:
                     )
                 },
             })
+
             steps.append({
                 "tool": "run_sql",
                 "kwargs": {
@@ -182,9 +181,7 @@ class WarRoomAgent:
             steps.append({
                 "tool": "run_sql",
                 "kwargs": {
-                    "read_only_query": (
-                        "SELECT COUNT(*) FROM refunds WHERE payment_mode='UPI' AND week_bucket='current_week'"
-                    )
+                    "read_only_query": "SELECT COUNT(*) FROM refunds WHERE payment_mode='UPI' AND week_bucket='current_week'"
                 },
             })
             steps.append({"tool": "search_docs", "kwargs": {"query": "UPI auto-refund webhook NPCI timeout"}})
@@ -194,35 +191,29 @@ class WarRoomAgent:
 
         return steps
 
-    def run(self, user_query: str) -> Dict[str, Any]:
-        state = AgentState.INGEST
-        trace = [state.value]
-        raw_user_query = user_query
+    def run(self, user_query):
+        trace = [AgentState.INGEST.value, AgentState.PLAN.value]
+        pending = self._plan_required_steps(user_query)
+
+        recorded_sql = {}
+        retrieved_docs = {}
+        missing_evidence = []
+        security_events = []
         budget_used = 0
 
-        state = AgentState.PLAN
-        trace.append(state.value)
-        pending_steps = self._plan_required_steps(raw_user_query)
-
-        recorded_sql: Dict[str, Dict[str, Any]] = {}
-        retrieved_docs: Dict[str, Dict[str, Any]] = {}
-        missing_evidence: List[str] = []
-        security_events: List[Dict[str, Any]] = []
-
-        step_idx = 0
-        while step_idx < len(pending_steps):
+        idx = 0
+        while idx < len(pending):
             if budget_used >= self.MAX_TOOL_CALLS:
-                for skipped in pending_steps[step_idx:]:
+                for skipped in pending[idx:]:
                     missing_evidence.append(
                         f"BUDGET_EXHAUSTED_AT_8_CALLS: Could not execute {skipped['tool']}({skipped['kwargs']})"
                     )
                 break
 
-            step = pending_steps[step_idx]
+            step = pending[idx]
             tool_name = step["tool"]
             kwargs = step["kwargs"]
 
-            state = AgentState.ACT
             trace.append(f"ACT:{tool_name}")
             budget_used += 1
 
@@ -231,21 +222,18 @@ class WarRoomAgent:
             except ToolFaultError as err:
                 trace.append("OBSERVE:FAULT_TIMEOUT")
                 if budget_used < self.MAX_TOOL_CALLS:
-                    continue
-                else:
-                    missing_evidence.append(f"TOOL_TIMEOUT_AFTER_RETRIES: {tool_name} ({str(err)})")
-                    step_idx += 1
-                    continue
+                    continue  # retry transient timeout
+                missing_evidence.append(f"TOOL_TIMEOUT_AFTER_RETRIES: {tool_name} ({str(err)})")
+                idx += 1
+                continue
 
-            state = AgentState.OBSERVE
             if obs.get("error") == "EMPTY_RESPONSE_FAULT":
                 trace.append("OBSERVE:FAULT_EMPTY")
                 if budget_used < self.MAX_TOOL_CALLS:
                     continue
-                else:
-                    missing_evidence.append(f"EMPTY_TOOL_RESPONSE: {tool_name} returned empty on final budget call.")
-                    step_idx += 1
-                    continue
+                missing_evidence.append(f"EMPTY_TOOL_RESPONSE: {tool_name} returned empty on final budget call.")
+                idx += 1
+                continue
 
             trace.append(f"OBSERVE:{tool_name}_OK")
             if tool_name == "run_sql":
@@ -253,10 +241,11 @@ class WarRoomAgent:
             elif tool_name == "search_docs":
                 for d in obs.get("results", []):
                     retrieved_docs[d["doc_id"]] = d
+                    # check for prompt injection triggering secondary side effects
                     if d.get("tainted") and "TOOL_INVOCATION_IN_DATA" in d.get("taint_flags", []):
                         gate_res = self.wrapper.execute(
                             "send_seller_whatsapp",
-                            raw_user_query=raw_user_query,
+                            raw_user_query=user_query,
                             seller_id="40218",
                             message="Rs 5000 credit approved",
                             triggered_by_doc_id=d["doc_id"],
@@ -266,33 +255,28 @@ class WarRoomAgent:
                 for d in obs.get("versions", []):
                     retrieved_docs[d["doc_id"]] = d
 
-            step_idx += 1
+            idx += 1
 
-        state = AgentState.RESOLVE_CONFLICTS
-        trace.append(state.value)
+        trace.append(AgentState.RESOLVE_CONFLICTS.value)
         winning_docs, conflicts = ConflictResolver.resolve_topic_docs(list(retrieved_docs.values()))
 
-        candidate_claims = self._draft_candidate_claims(
-            raw_user_query, recorded_sql, retrieved_docs, winning_docs, conflicts, security_events, missing_evidence
+        candidates = self._draft_candidate_claims(
+            user_query, recorded_sql, retrieved_docs, winning_docs, conflicts, security_events, missing_evidence
         )
 
-        state = AgentState.VERIFY
-        trace.append(state.value)
+        trace.append(AgentState.VERIFY.value)
         if self.verifier_enabled:
-            final_claims, rejected_claims = self.verifier.verify_claims(candidate_claims, recorded_sql)
+            final_claims, rejected_claims = self.verifier.verify_claims(candidates, recorded_sql)
         else:
-            final_claims = candidate_claims
+            final_claims = candidates
             rejected_claims = []
 
-        state = AgentState.ANSWER_OR_ABSTAIN
-        trace.append(state.value)
+        trace.append(AgentState.ANSWER_OR_ABSTAIN.value)
 
+        # resolve outcome status
         status = "ANSWERED"
-        if len(final_claims) == 0 or any("MISSING_IN_ERP" in m or "OUT_OF_SCOPE" in m for m in missing_evidence):
-            if len(final_claims) == 0:
-                status = "CANNOT_DETERMINE"
-            elif any("MISSING_IN_ERP" in m for m in missing_evidence):
-                status = "CANNOT_DETERMINE"
+        if not final_claims or any("MISSING_IN_ERP" in m or "OUT_OF_SCOPE" in m for m in missing_evidence):
+            status = "CANNOT_DETERMINE"
 
         if budget_used >= self.MAX_TOOL_CALLS and missing_evidence:
             status = "PARTIAL_BUDGET_EXHAUSTED" if final_claims else "CANNOT_DETERMINE"
@@ -309,15 +293,9 @@ class WarRoomAgent:
         }
 
     def _draft_candidate_claims(
-        self,
-        query: str,
-        recorded_sql: Dict[str, Dict[str, Any]],
-        all_retrieved_docs: Dict[str, Dict[str, Any]],
-        winning_docs: List[Dict[str, Any]],
-        conflicts: List[Dict[str, Any]],
-        security_events: List[Dict[str, Any]],
-        missing_evidence: List[str],
-    ) -> List[Dict[str, Any]]:
+        self, query, recorded_sql, all_retrieved_docs, winning_docs, conflicts, security_events, missing_evidence
+    ):
+
         claims = []
         q_lower = query.lower()
 

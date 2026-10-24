@@ -1,37 +1,35 @@
-# verifier.py
 import re
-from typing import Dict, Any, List, Tuple
 from injection_gate import TaintScanner
 
 
 class ConflictResolver:
     @staticmethod
-    def resolve_topic_docs(docs: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        by_topic: Dict[str, List[Dict[str, Any]]] = {}
+    def resolve_topic_docs(docs):
+        grouped = {}
         for d in docs:
-            topic = d.get("topic") or d["doc_id"]
-            by_topic.setdefault(topic, []).append(d)
+            t = d.get("topic") or d["doc_id"]
+            grouped.setdefault(t, []).append(d)
 
-        winning_docs = []
-        conflicts_found = []
+        winning, conflicts = [], []
 
-        for topic, group in by_topic.items():
+        for topic, group in grouped.items():
             if len(group) == 1:
-                winning_docs.append(group[0])
+                winning.append(group[0])
                 continue
 
-            def sort_key(doc: Dict[str, Any]):
+            # newest effective_date wins; fallback to authority_rank then created_at
+            def doc_precedence(d):
                 return (
-                    doc.get("effective_date") or "0000-00-00",
-                    int(doc.get("authority_rank", 0)),
-                    doc.get("created_at") or "0000-00-00",
+                    d.get("effective_date") or "0000-00-00",
+                    int(d.get("authority_rank", 0)),
+                    d.get("created_at") or "0000-00-00",
                 )
 
-            ranked = sorted(group, key=sort_key, reverse=True)
+            ranked = sorted(group, key=doc_precedence, reverse=True)
             top1, top2 = ranked[0], ranked[1]
 
-            if sort_key(top1) == sort_key(top2):
-                conflicts_found.append({
+            if doc_precedence(top1) == doc_precedence(top2):
+                conflicts.append({
                     "topic": topic,
                     "doc_a": top1["doc_id"],
                     "val_a": top1.get("conflict_value", top1["text"]),
@@ -40,9 +38,9 @@ class ConflictResolver:
                     "status": "UNRESOLVED_EQUAL_AUTHORITY_AND_DATE",
                     "rule_applied": "Both documents share effective_date=2026-10-18 and authority=LOGISTICS_AUDIT; agent refuses to pick a side.",
                 })
-                winning_docs.extend([top1, top2])
+                winning.extend([top1, top2])
             else:
-                conflicts_found.append({
+                conflicts.append({
                     "topic": topic,
                     "winner_doc": top1["doc_id"],
                     "overridden_doc": top2["doc_id"],
@@ -52,112 +50,110 @@ class ConflictResolver:
                         f"supersedes {top2['doc_id']} (date={top2.get('effective_date')}, auth={top2.get('authority')})."
                     ),
                 })
-                winning_docs.append(top1)
+                winning.append(top1)
 
-        return winning_docs, conflicts_found
+        return winning, conflicts
 
 
 class DeterministicVerifier:
-    def __init__(self, docs_by_id: Dict[str, Dict[str, Any]]):
+    def __init__(self, docs_by_id):
         self.docs_by_id = docs_by_id
 
     @staticmethod
-    def _extract_numbers(text: str) -> List[float]:
-        cleaned = re.sub(r"DOC-[A-Z]+-\d+", "", text)
-        cleaned = re.sub(r"Tier-[123]", "", cleaned, flags=re.I)
-        cleaned = re.sub(r"T\+\d+", "", cleaned)
-        cleaned = re.sub(r"\d{4}-\d{2}-\d{2}", "", cleaned)
-        cleaned = re.sub(r"#\d+", "", cleaned)
-        cleaned = re.sub(r"v\d+\.\d+", "", cleaned)
-        cleaned = re.sub(r"seller\s*\d+", "", cleaned, flags=re.I)
-        raw_nums = re.findall(r"\b\d+(?:\.\d+)?\b", cleaned)
-        return [float(x) for x in raw_nums]
+    def _extract_numbers(text):
+        # strip entity codes and identifiers before parsing quantities
+        s = re.sub(r"DOC-[A-Z]+-\d+", "", text)
+        s = re.sub(r"Tier-[123]", "", s, flags=re.I)
+        s = re.sub(r"T\+\d+", "", s)
+        s = re.sub(r"\d{4}-\d{2}-\d{2}", "", s)
+        s = re.sub(r"#\d+", "", s)
+        s = re.sub(r"v\d+\.\d+", "", s)
+        s = re.sub(r"seller\s*\d+", "", s, flags=re.I)
+        return [float(x) for x in re.findall(r"\b\d+(?:\.\d+)?\b", s)]
 
-    def verify_claims(
-        self,
-        candidate_claims: List[Dict[str, Any]],
-        recorded_sql_results: Dict[str, Dict[str, Any]],
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        verified_claims = []
-        rejected_claims = []
+    def verify_claims(self, candidate_claims, recorded_sql_results):
+        passed, rejected = [], []
 
-        for claim in candidate_claims:
-            ctype = claim.get("type", "fact")
+        for c in candidate_claims:
+            ctype = c.get("type", "fact")
             if ctype in ("assumption", "recommendation"):
-                verified_claims.append(claim)
+                passed.append(c)
                 continue
 
-            evidence = claim.get("evidence", {})
-            text = claim.get("text", "")
+            ev = c.get("evidence", {})
+            txt = c.get("text", "")
 
-            if "doc_id" in evidence:
-                doc_id = evidence["doc_id"]
-                quoted_span = evidence.get("quoted_span", "")
-                raw_doc = self.docs_by_id.get(doc_id)
-
-                if not raw_doc:
-                    rejected_claims.append({"claim": claim, "reason": "UNKNOWN_DOC_ID"})
+            # 1. Unstructured text evidence
+            if "doc_id" in ev:
+                did = ev["doc_id"]
+                doc = self.docs_by_id.get(did)
+                if not doc:
+                    rejected.append({"claim": c, "reason": "UNKNOWN_DOC_ID"})
                     continue
 
-                is_tainted, _ = TaintScanner.scan_document(raw_doc)
-                if (raw_doc.get("tainted", False) or is_tainted) and not claim.get("is_security_report", False):
-                    rejected_claims.append({"claim": claim, "reason": "TAINTED_INJECTION_SOURCE"})
+                tainted, _ = TaintScanner.scan_document(doc)
+                if (doc.get("tainted") or tainted) and not c.get("is_security_report"):
+                    rejected.append({"claim": c, "reason": "TAINTED_INJECTION_SOURCE"})
                     continue
 
-                if not quoted_span or quoted_span not in raw_doc["text"]:
-                    rejected_claims.append({"claim": claim, "reason": "NON_VERBATIM_QUOTED_SPAN"})
+                span = ev.get("quoted_span", "")
+                if not span or span not in doc.get("text", ""):
+                    rejected.append({"claim": c, "reason": "NON_VERBATIM_QUOTED_SPAN"})
                     continue
 
-                if raw_doc.get("status") == "superseded" and not claim.get("flags_superseded", False):
-                    rejected_claims.append({"claim": claim, "reason": "UNFLAGGED_SUPERSEDED_POLICY"})
+                if doc.get("status") == "superseded" and not c.get("flags_superseded"):
+                    rejected.append({"claim": c, "reason": "UNFLAGGED_SUPERSEDED_POLICY"})
                     continue
 
-                if raw_doc.get("status") == "incomplete_record" and not claim.get("flags_missing_field", False):
-                    rejected_claims.append({"claim": claim, "reason": "UNFLAGGED_INCOMPLETE_RECORD"})
+                if doc.get("status") == "incomplete_record" and not c.get("flags_missing_field"):
+                    rejected.append({"claim": c, "reason": "UNFLAGGED_INCOMPLETE_RECORD"})
                     continue
 
-                claim_nums = self._extract_numbers(text)
-                span_nums = set(self._extract_numbers(quoted_span))
-                if not all(any(abs(cn - sn) < 1e-2 for sn in span_nums) for cn in claim_nums):
-                    rejected_claims.append({"claim": claim, "reason": "NUMBER_NOT_IN_QUOTED_SPAN"})
+                c_nums = self._extract_numbers(txt)
+                span_nums = set(self._extract_numbers(span))
+                if not all(any(abs(x - y) < 1e-2 for y in span_nums) for x in c_nums):
+                    rejected.append({"claim": c, "reason": "NUMBER_NOT_IN_QUOTED_SPAN"})
                     continue
 
-                verified_claims.append(claim)
+                passed.append(c)
 
-            elif "sql_query" in evidence:
-                sql_q = evidence["sql_query"]
-                claimed_hash = evidence.get("result_sha256", "")
-                sql_rec = recorded_sql_results.get(sql_q)
+            # 2. Structured SQL evidence
+            elif "sql_query" in ev:
+                sql_q = ev["sql_query"]
+                claimed_hash = ev.get("result_sha256", "")
+                sql_meta = recorded_sql_results.get(sql_q)
 
-                if not sql_rec or sql_rec.get("result_sha256") != claimed_hash:
-                    rejected_claims.append({"claim": claim, "reason": "SQL_HASH_MISMATCH_OR_UNRECORDED"})
+                if not sql_meta or sql_meta.get("result_sha256") != claimed_hash:
+                    rejected.append({"claim": c, "reason": "SQL_HASH_MISMATCH_OR_UNRECORDED"})
                     continue
 
-                valid_sql_nums = set()
-                flat_nums = []
-                for row in sql_rec.get("rows", []):
+                valid_vals = set()
+                raw_nums = []
+                for row in sql_meta.get("rows", []):
                     for cell in row:
                         if isinstance(cell, (int, float)):
-                            valid_sql_nums.add(float(cell))
-                            flat_nums.append(float(cell))
+                            valid_vals.add(float(cell))
+                            raw_nums.append(float(cell))
                         elif isinstance(cell, str) and cell.isdigit():
-                            valid_sql_nums.add(float(cell))
+                            valid_vals.add(float(cell))
 
-                if flat_nums:
-                    valid_sql_nums.add(float(sum(flat_nums)))
-                for a in flat_nums:
-                    for b in flat_nums:
+                if raw_nums:
+                    valid_vals.add(float(sum(raw_nums)))
+                for a in raw_nums:
+                    for b in raw_nums:
                         if b > 0:
-                            valid_sql_nums.add(round(((a - b) / b) * 100.0, 1))
-                            valid_sql_nums.add(round((a / b) * 100.0, 1))
+                            valid_vals.add(round(((a - b) / b) * 100.0, 1))
+                            valid_vals.add(round((a / b) * 100.0, 1))
 
-                claim_nums = self._extract_numbers(text)
-                if not all(any(abs(cn - vn) < 0.15 for vn in valid_sql_nums) for cn in claim_nums):
-                    rejected_claims.append({"claim": claim, "reason": "UNSUPPORTED_SQL_NUMBER"})
+                claim_nums = self._extract_numbers(txt)
+                if not all(any(abs(cn - vn) < 0.15 for vn in valid_vals) for cn in claim_nums):
+                    rejected.append({"claim": c, "reason": "UNSUPPORTED_SQL_NUMBER"})
                     continue
 
-                verified_claims.append(claim)
+                passed.append(c)
             else:
-                rejected_claims.append({"claim": claim, "reason": "MISSING_EVIDENCE_OBJECT"})
+                rejected.append({"claim": c, "reason": "MISSING_EVIDENCE_OBJECT"})
 
-        return verified_claims, rejected_claims
+        return passed, rejected
+
+

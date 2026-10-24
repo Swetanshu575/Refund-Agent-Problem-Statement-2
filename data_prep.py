@@ -1,15 +1,13 @@
-# data_prep.py
 import os
 import json
 import random
 import sqlite3
-from typing import Dict, List, Any
 
 DB_PATH = "war_room.db"
 CORPUS_PATH = "corpus.json"
 
 
-def build_sqlite_db(db_path: str = DB_PATH, seed: int = 42) -> None:
+def build_sqlite_db(db_path=DB_PATH, seed=42):
     rng = random.Random(seed)
     if os.path.exists(db_path):
         os.remove(db_path)
@@ -48,7 +46,7 @@ def build_sqlite_db(db_path: str = DB_PATH, seed: int = 42) -> None:
         )
     """)
 
-    zones_by_tier = {
+    zones = {
         "Tier-1": ["Mumbai_Bhiwandi", "Delhi_Gurugram", "Bengaluru_Hosur", "Kolkata_Hub", "Hyderabad_Hub"],
         "Tier-2": ["Jaipur_Hub", "Lucknow_Hub", "Coimbatore_TN", "Indore_Hub", "Surat_Textile"],
         "Tier-3": ["Guwahati_NE", "Patna_Zone", "Madurai_TN", "Ranchi_JH", "Siliguri_WB"],
@@ -64,7 +62,7 @@ def build_sqlite_db(db_path: str = DB_PATH, seed: int = 42) -> None:
             for _ in range(count):
                 oid += 1
                 seller_id = "40218" if (oid % 35 == 0) else rng.choice(sellers)
-                zone = rng.choice(zones_by_tier[tier])
+                zone = rng.choice(zones[tier])
                 if tier == "Tier-3":
                     pmode = "COD" if rng.random() < 0.68 else rng.choice(["UPI", "CARD"])
                     courier = (
@@ -91,66 +89,58 @@ def build_sqlite_db(db_path: str = DB_PATH, seed: int = 42) -> None:
     refund_rows = []
     rid = 50000
 
-    def add_refund_batch(
-        week: str,
-        tier: str,
-        reason: str,
-        count: int,
-        forced_zone: str = None,
-        forced_pmode: str = None,
-        forced_courier: str = None,
-        forced_seller: str = None,
-    ):
+    def add_refunds(week, tier, reason, count, zone=None, pmode=None, courier=None, seller=None):
         nonlocal rid
         for _ in range(count):
             rid += 1
             order_id = 10000 + (rid % 2000) + 1
             rdate = "2026-10-14" if week == "prev_week" else "2026-10-22"
-            seller_id = forced_seller if forced_seller else ("40218" if rid % 42 == 0 else rng.choice(sellers))
-            zone = forced_zone if forced_zone else rng.choice(zones_by_tier[tier])
-            pmode = forced_pmode if forced_pmode else rng.choice(["COD", "UPI", "CARD"])
-            courier = forced_courier if forced_courier else rng.choice(couriers)
-            amt = 1500.0 if seller_id == "40218" else round(rng.uniform(500.0, 2400.0), 2)
-            refund_rows.append((rid, order_id, rdate, seller_id, tier, zone, pmode, reason, amt, courier, week))
+            sid = seller if seller else ("40218" if rid % 42 == 0 else rng.choice(sellers))
+            z = zone if zone else rng.choice(zones[tier])
+            pm = pmode if pmode else rng.choice(["COD", "UPI", "CARD"])
+            cp = courier if courier else rng.choice(couriers)
+            amt = 1500.0 if sid == "40218" else round(rng.uniform(500.0, 2400.0), 2)
+            refund_rows.append((rid, order_id, rdate, sid, tier, z, pm, reason, amt, cp, week))
 
-    # Previous week baseline refunds
-    add_refund_batch("prev_week", "Tier-1", "size_fit_issue", 85, forced_pmode="UPI")
-    add_refund_batch("prev_week", "Tier-1", "wrong_item_sent", 50, forced_pmode="CARD")
-    add_refund_batch("prev_week", "Tier-2", "size_fit_issue", 50, forced_pmode="UPI")
-    add_refund_batch("prev_week", "Tier-2", "delayed_delivery_sla_breach", 30, forced_pmode="COD")
-    add_refund_batch("prev_week", "Tier-3", "delayed_delivery_sla_breach", 32, forced_pmode="COD")
-    add_refund_batch("prev_week", "Tier-3", "damaged_in_transit", 18, forced_pmode="COD")
-    add_refund_batch("prev_week", "Tier-3", "size_fit_issue", 10, forced_pmode="UPI")
+    # baseline prior week data
+    add_refunds("prev_week", "Tier-1", "size_fit_issue", 85, pmode="UPI")
+    add_refunds("prev_week", "Tier-1", "wrong_item_sent", 50, pmode="CARD")
+    add_refunds("prev_week", "Tier-2", "size_fit_issue", 50, pmode="UPI")
+    add_refunds("prev_week", "Tier-2", "delayed_delivery_sla_breach", 30, pmode="COD")
+    add_refunds("prev_week", "Tier-3", "delayed_delivery_sla_breach", 32, pmode="COD")
+    add_refunds("prev_week", "Tier-3", "damaged_in_transit", 18, pmode="COD")
+    add_refunds("prev_week", "Tier-3", "size_fit_issue", 10, pmode="UPI")
 
-    # Current week Tier-1 (140) and Tier-2 (85)
-    add_refund_batch("current_week", "Tier-1", "size_fit_issue", 90, forced_pmode="UPI")
-    add_refund_batch("current_week", "Tier-1", "wrong_item_sent", 50, forced_pmode="CARD")
-    add_refund_batch("current_week", "Tier-2", "size_fit_issue", 50, forced_pmode="UPI")
-    add_refund_batch("current_week", "Tier-2", "delayed_delivery_sla_breach", 35, forced_pmode="COD")
+    # current week data (Tier-1: 140, Tier-2: 85, Tier-3: 165)
+    add_refunds("current_week", "Tier-1", "size_fit_issue", 90, pmode="UPI")
+    add_refunds("current_week", "Tier-1", "wrong_item_sent", 50, pmode="CARD")
+    add_refunds("current_week", "Tier-2", "size_fit_issue", 50, pmode="UPI")
+    add_refunds("current_week", "Tier-2", "delayed_delivery_sla_breach", 35, pmode="COD")
 
-    # Current week Tier-3 (165 total -> 175.0% jump over prev_week's 60)
-    add_refund_batch("current_week", "Tier-3", "delayed_delivery_sla_breach", 44, forced_pmode="COD", forced_courier="Shadowfax")
-    add_refund_batch("current_week", "Tier-3", "delayed_delivery_sla_breach", 30, forced_pmode="COD", forced_courier="EcomExpress")
-    add_refund_batch("current_week", "Tier-3", "delayed_delivery_sla_breach", 15, forced_pmode="UPI", forced_courier="Shadowfax")
-    add_refund_batch("current_week", "Tier-3", "damaged_in_transit", 31, forced_zone="Guwahati_NE", forced_pmode="COD")
-    add_refund_batch("current_week", "Tier-3", "damaged_in_transit", 21, forced_zone="Patna_Zone", forced_pmode="COD")
-    add_refund_batch("current_week", "Tier-3", "wrong_item_sent", 12, forced_pmode="COD", forced_seller="40218")
-    add_refund_batch("current_week", "Tier-3", "wrong_item_sent", 3, forced_pmode="UPI", forced_seller="10101")
-    add_refund_batch("current_week", "Tier-3", "size_fit_issue", 9, forced_pmode="UPI", forced_seller="20202")
+    # strike + monsoon damage spikes in Tier-3
+    add_refunds("current_week", "Tier-3", "delayed_delivery_sla_breach", 44, pmode="COD", courier="Shadowfax")
+    add_refunds("current_week", "Tier-3", "delayed_delivery_sla_breach", 30, pmode="COD", courier="EcomExpress")
+    add_refunds("current_week", "Tier-3", "delayed_delivery_sla_breach", 15, pmode="UPI", courier="Shadowfax")
+    add_refunds("current_week", "Tier-3", "damaged_in_transit", 31, zone="Guwahati_NE", pmode="COD")
+    add_refunds("current_week", "Tier-3", "damaged_in_transit", 21, zone="Patna_Zone", pmode="COD")
+    add_refunds("current_week", "Tier-3", "wrong_item_sent", 12, pmode="COD", seller="40218")
+    add_refunds("current_week", "Tier-3", "wrong_item_sent", 3, pmode="UPI", seller="10101")
+    add_refunds("current_week", "Tier-3", "size_fit_issue", 9, pmode="UPI", seller="20202")
 
     cleaned_refunds = []
     for r in refund_rows:
-        r_list = list(r)
-        if r_list[3] == "40218" and not (r_list[10] == "current_week" and r_list[7] == "wrong_item_sent"):
-            r_list[3] = "30303"
-        cleaned_refunds.append(tuple(r_list))
+        row = list(r)
+        if row[3] == "40218" and not (row[10] == "current_week" and row[7] == "wrong_item_sent"):
+            row[3] = "30303"
+        cleaned_refunds.append(tuple(row))
 
     cur.executemany("INSERT INTO refunds VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", cleaned_refunds)
     conn.commit()
     conn.close()
 
 
-def build_document_corpus(corpus_path: str = CORPUS_PATH) -> List[Dict[str, Any]]:
+
+def build_document_corpus(corpus_path=CORPUS_PATH):
     docs = [
         {
             "doc_id": "DOC-POL-001",
@@ -372,7 +362,7 @@ def build_document_corpus(corpus_path: str = CORPUS_PATH) -> List[Dict[str, Any]
     return docs
 
 
-def ensure_environment_ready() -> List[Dict[str, Any]]:
+def ensure_environment_ready():
     build_sqlite_db(DB_PATH, seed=42)
     return build_document_corpus(CORPUS_PATH)
 

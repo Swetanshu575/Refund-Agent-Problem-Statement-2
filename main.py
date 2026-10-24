@@ -4,70 +4,65 @@ import io
 import time
 from eval_12_questions import run_full_evaluation
 
-# quick config
-README_FILE = "README.md"
-START_TAG = "<!-- BENCHMARK_OUTPUT_START -->"
-END_TAG = "<!-- BENCHMARK_OUTPUT_END -->"
+README = "README.md"
+START_MARKER = "<!-- BENCHMARK_OUTPUT_START -->"
+END_MARKER = "<!-- BENCHMARK_OUTPUT_END -->"
 
 
-class Tee(object):
-    """small helper to print to terminal and capture to buffer at the same time"""
-    def __init__(self, stream):
-        self.stream = stream
-        self.mem = io.StringIO()
+class DualWriter:
+    # capture stdout while streaming live to console
+    def __init__(self, out_stream):
+        self.stream = out_stream
+        self.buf = io.StringIO()
 
-    def write(self, data):
-        self.stream.write(data)
-        self.mem.write(data)
+    def write(self, s):
+        self.stream.write(s)
+        self.buf.write(s)
 
     def flush(self):
         self.stream.flush()
 
-    def value(self):
-        return self.mem.getvalue()
+    def get_output(self):
+        return self.buf.getvalue()
 
 
-def sync_readme(new_output: str):
-    if not os.path.exists(README_FILE):
-        print(f"warn: {README_FILE} not found, skipping sync")
+def update_readme_benchmark(output_str):
+    if not os.path.exists(README):
         return
 
-    with open(README_FILE, "r", encoding="utf-8") as fp:
-        content = fp.read()
+    with open(README, "r", encoding="utf-8") as f:
+        doc = f.read()
 
-    formatted_block = f"{START_TAG}\n```text\n{new_output.strip()}\n```\n{END_TAG}"
-
-    if START_TAG in content and END_TAG in content:
-        head = content.split(START_TAG)[0]
-        tail = content.split(END_TAG)[1]
-        updated = head + formatted_block + tail
+    block = f"{START_MARKER}\n```text\n{output_str.strip()}\n```\n{END_MARKER}"
+    if START_MARKER in doc and END_MARKER in doc:
+        head, _ = doc.split(START_MARKER, 1)
+        _, tail = doc.split(END_MARKER, 1)
+        doc = head + block + tail
     else:
-        # if someone accidentally deleted the tags, just stick it at the bottom
-        updated = content + "\n\n## Latest Console Output\n\n" + formatted_block
+        doc = doc.rstrip() + "\n\n## Latest Run\n\n" + block + "\n"
 
-    with open(README_FILE, "w", encoding="utf-8") as fp:
-        fp.write(updated)
+    with open(README, "w", encoding="utf-8") as f:
+        f.write(doc)
 
 
 def main():
-    start = time.time()
-    
-    # redirect stdout to our tee logger so we see progress live
+    t0 = time.time()
     orig_stdout = sys.stdout
-    tee = Tee(orig_stdout)
-    sys.stdout = tee
+    writer = DualWriter(orig_stdout)
+    sys.stdout = writer
 
     try:
         run_full_evaluation()
     finally:
         sys.stdout = orig_stdout
 
-    captured = tee.value()
-    sync_readme(captured)
+    captured = writer.get_output()
+    update_readme_benchmark(captured)
     
-    elapsed = round(time.time() - start, 2)
-    print(f"\n[main.py] Done in {elapsed}s. Console output automatically saved into {README_FILE}.")
+    elapsed = time.time() - t0
+    print(f"\n[main.py] Done in {elapsed:.2f}s. Console output automatically saved into {README}.")
 
 
 if __name__ == "__main__":
     main()
+
