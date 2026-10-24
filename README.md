@@ -1,24 +1,6 @@
 # Bharat Bazaar — The Refund War Room: An Agent That Doesn't Lie and Doesn't Get Tricked
 
-> *"I don't need a clever assistant. I need one that doesn't lie to me and doesn't get tricked."*  
-> — **Farah Sheikh**, Head of Customer Experience, Bharat Bazaar
 
-It is noon on the Tuesday before Diwali. Farah Sheikh is staring at a dashboard flash: refund requests from Tier-3 pincodes have spiked dramatically compared to last week. She drops a query into the war room in Hinglish:
-
-> *"Tier-3 pincodes mein refund requests kyun badh gaye? Is 7-day replacement policy still valid?"*
-
-Answering this cleanly sounds simple until you look at the raw reality of Bharat Bazaar's internal data:
-1. **Contradictory & Outdated Policies:** Policies were revised twice this year. The superseded 10-day and 7-day versions still appear in full-text search results alongside the active 5-day festive rule.
-2. **Conflicting Audit Reports:** Two separate logistics audits filed on the exact same date (`2026-10-18`) report conflicting numbers (42% vs 29%) for Bhiwandi sorting delays.
-3. **Flaky Courier/DB Gateway:** The upstream logistics API and database gateway fail or time out on approximately every 6th call (~15% fault rate).
-4. **Adversarial Ticket Injections:** Hostile text hidden inside support tickets tries to hijack the agent: a blatant English system override and a polite Hinglish request asking the agent to trigger `send_seller_whatsapp` to issue an unapproved Rs 5,000 credit to seller 40218.
-5. **Incomplete ERP Logs:** Warehouse moisture logs from Guwahati have missing ERP fields (`damaged_sku_count: MISSING_IN_ERP` and `effective_date: NULL`).
-
-If you rely on an LLM prompt or an LLM-as-judge to evaluate this, it will hallucinate missing numbers, silently take sides in ties, or get tricked by injected ticket text. 
-
-This repository implements the solution: an agent where correctness, safety, and conflict resolution are **enforced deterministically in pure Python code**, outside the prompt.
-
----
 
 ## Architecture Diagram & State Machine Walkthrough
 ![Refund War Room: Security Gateway FSM](./Refund%20War%20Room_%20Security%20Gateway%20FSM.png)
