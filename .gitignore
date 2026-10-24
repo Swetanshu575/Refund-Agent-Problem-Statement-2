@@ -14,3 +14,6 @@ env/
 # Logs & archives
 *.log
 *.zip
+
+# Sub-projects
+Diwali/
